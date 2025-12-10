@@ -30,7 +30,7 @@ std::vector<Token> lz77_compress_brute(const std::string &s) {
 
         for (int start = 0; start < pos; ++start) {
             int len = 0;
-            while (pos + len < n && start + len < pos && s[start + len] == s[pos + len]) {
+            while (pos + len < n && s[start + len] == s[pos + len]) {
                 ++len;
             }
             if (len > best_len) {
@@ -58,7 +58,6 @@ std::vector<Token> lz77_compress_brute(const std::string &s) {
 
     return result;
 }
-
 
 static std::string map_with_terminator(const std::string &s) {
     if (s.empty()) return std::string(1, '\0');
@@ -165,9 +164,8 @@ std::vector<Token> lz77_compress_sa(const std::string &s) {
             if (minL < best_len) break;
             int j = sa[i];
             if (j < pos) {
+                // разрешаем перекрытие: НЕ ограничиваем длину pos-j
                 int allowed = minL;
-                int max_allowed = pos - j;
-                if (max_allowed < allowed) allowed = max_allowed;
                 if (allowed > best_len) {
                     best_len = allowed;
                     best_start = j;
@@ -190,8 +188,6 @@ std::vector<Token> lz77_compress_sa(const std::string &s) {
             int j = sa[i];
             if (j < pos) {
                 int allowed = minL;
-                int max_allowed = pos - j;
-                if (max_allowed < allowed) allowed = max_allowed;
                 if (allowed > best_len) {
                     best_len = allowed;
                     best_start = j;
