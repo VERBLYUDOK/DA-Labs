@@ -19,46 +19,6 @@ struct Token {
     }
 };
 
-std::vector<Token> lz77_compress_brute(const std::string &s) {
-    int n = static_cast<int>(s.size());
-    int pos = 0;
-    std::vector<Token> result;
-
-    while (pos < n) {
-        int best_len = 0;
-        int best_offset = 0;
-
-        for (int start = 0; start < pos; ++start) {
-            int len = 0;
-            while (pos + len < n && s[start + len] == s[pos + len]) {
-                ++len;
-            }
-            if (len > best_len) {
-                best_len = len;
-                best_offset = pos - start;
-            } else if (len == best_len && len > 0) {
-                int off = pos - start;
-                if (best_offset == 0 || off < best_offset) best_offset = off;
-            }
-        }
-
-        if (best_len == 0) {
-            result.push_back({0, 0, s[pos], true});
-            pos += 1;
-        } else {
-            if (pos + best_len < n) {
-                result.push_back({best_offset, best_len, s[pos + best_len], true});
-                pos += best_len + 1;
-            } else {
-                result.push_back({best_offset, best_len, '\0', false});
-                pos += best_len;
-            }
-        }
-    }
-
-    return result;
-}
-
 static std::string map_with_terminator(const std::string &s) {
     if (s.empty()) return std::string(1, '\0');
     unsigned char minc = 255;
@@ -277,65 +237,6 @@ std::vector<std::string> tokens_to_lines(const std::vector<Token> &toks) {
     return out;
 }
 
-void run_debug_tests() {
-    std::mt19937_64 rng(123456);
-    std::uniform_int_distribution<int> len_dist(0, 30);
-    std::string alphabet = "ab ";
-
-    auto rand_string = [&](int L) {
-        std::string s;
-        s.resize(L);
-        for (int i = 0; i < L; ++i) s[i] = alphabet[rng() % alphabet.size()];
-        return s;
-    };
-
-    // fixed tests
-    std::vector<std::string> fixed = {
-        "abracadabra",
-        "abracadabra abracadabra",
-        "aaaaaaa",
-        "ababa",
-        "abcabcabcabc",
-        "aba aba",
-        "ab    ab    ",
-        "    ",
-        "ab\nab",
-        ""
-    };
-
-    for (auto &t : fixed) {
-        auto a = lz77_compress_brute(t);
-        auto b = lz77_compress_sa(t);
-        if (a != b) {
-            std::cerr << "Mismatch on fixed test: \"" << t << "\"\n";
-            auto la = tokens_to_lines(a);
-            auto lb = tokens_to_lines(b);
-            std::cerr << "BRUTE:\n"; for (auto &x: la) std::cerr << x << "\n";
-            std::cerr << "SA:\n"; for (auto &x: lb) std::cerr << x << "\n";
-            return;
-        }
-    }
-
-    // random tests
-    for (int iter = 0; iter < 1000; ++iter) {
-        int L = len_dist(rng);
-        std::string s = rand_string(L);
-        auto a = lz77_compress_brute(s);
-        auto b = lz77_compress_sa(s);
-        if (a != b) {
-            std::cerr << "Mismatch on random test (iter " << iter << "), string length " << L << ":\n";
-            std::cerr << '"' << s << "\"\n";
-            auto la = tokens_to_lines(a);
-            auto lb = tokens_to_lines(b);
-            std::cerr << "BRUTE:\n"; for (auto &x: la) std::cerr << x << "\n";
-            std::cerr << "SA:\n"; for (auto &x: lb) std::cerr << x << "\n";
-            return;
-        }
-    }
-
-    std::cerr << "All debug tests passed\n";
-}
-
 int main() {
     std::ios::sync_with_stdio(false);
     std::cin.tie(nullptr);
@@ -343,11 +244,6 @@ int main() {
     std::string cmd;
     if (!std::getline(std::cin, cmd)) return 0;
     trim(cmd);
-
-    if (cmd == "debug") {
-        run_debug_tests();
-        return 0;
-    }
 
     if (cmd == "compress") {
         std::string text;
