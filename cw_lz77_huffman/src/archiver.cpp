@@ -13,21 +13,27 @@
 // Сжатие LZ77 (level==1)
 void compress_stream_lz77(std::istream &in, std::ostream &out) {
     std::string data = read_all(in);
+    uint32_t crc = crc32(data);
     auto tokens = lz77_compress_sa(data);
-    write_tokens_binary(out, tokens, false);
+    write_tokens_binary(out, tokens, false, crc);
 }
 
 // Сжатие LZ77 + Huffman (level==9)
 void compress_stream_lz77_huffman(std::istream &in, std::ostream &out) {
     std::string data = read_all(in);
     auto tokens = lz77_compress_sa(data);
+    uint32_t crc = crc32(data);
     // utils::write_tokens_binary сам вызовет Huffman
-    write_tokens_binary(out, tokens, true);
+    write_tokens_binary(out, tokens, true, crc);
 }
 
 void decompress_stream_lz77(std::istream &in, std::ostream &out) {
-    auto tokens = read_tokens_binary(in);
+    auto [tokens, stored_crc] = read_tokens_binary(in);
     std::string s = lz77_decompress(tokens);
+    uint32_t computed_crc = crc32(s);
+    if (computed_crc != stored_crc) {
+        throw std::runtime_error("CRC32 mismatch: archive is corrupt");
+    }
     write_all(out, s);
 }
 
@@ -42,8 +48,10 @@ static int read_header_level(std::istream &in) {
     if (version == EOF) throw std::runtime_error("Truncated header");
     int level = in.get();
     if (level == EOF) throw std::runtime_error("Truncated header");
-    // skip reserved 2 bytes
-    in.get(); in.get();
+    // Пропускаем CRC32 (4 байта) + reserved (2 байта)
+    for (int i = 0; i < 6; ++i) {
+        if (in.get() == EOF) throw std::runtime_error("Truncated header");
+    }
     (void)version;
     return level;
 }
@@ -53,6 +61,7 @@ static int read_header_level(std::istream &in) {
 void list_archive_info(const std::string &path) {
     try {
         std::vector<Token> tokens;
+        uint32_t stored_crc;
         uint64_t compressed_size = 0;
         int level = -1;
 
@@ -66,7 +75,9 @@ void list_archive_info(const std::string &path) {
             // вернемся в начало
             iss.clear();
             iss.seekg(0);
-            tokens = read_tokens_binary(iss);
+            auto [toks, crc] = read_tokens_binary(iss);
+            tokens = std::move(toks);
+            stored_crc = crc;
         } else {
             std::ifstream fin(path, std::ios::binary);
             if (!fin.is_open()) {
@@ -77,7 +88,9 @@ void list_archive_info(const std::string &path) {
             level = read_header_level(fin);
             fin.clear();
             fin.seekg(0);
-            tokens = read_tokens_binary(fin);
+            auto [toks, crc] = read_tokens_binary(fin);
+            tokens = std::move(toks);
+            stored_crc = crc;
             std::error_code ec;
             compressed_size = std::filesystem::file_size(path, ec);
             if (ec) compressed_size = 0;
@@ -109,7 +122,7 @@ void test_archive(const std::string &path) {
         if (path == "-") {
             std::string raw = read_all(std::cin);
             std::istringstream iss(raw, std::ios::binary);
-            auto tokens = read_tokens_binary(iss);
+            auto [tokens, stored_crc] = read_tokens_binary(iss);
             // пробуем распаковать (без записи)
             std::string dec = lz77_decompress(tokens);
             (void)dec;
@@ -119,8 +132,12 @@ void test_archive(const std::string &path) {
                 std::cerr << "test: failed to open " << path << "\n";
                 return;
             }
-            auto tokens = read_tokens_binary(fin);
+            auto [tokens, stored_crc] = read_tokens_binary(fin);
             std::string dec = lz77_decompress(tokens);
+            uint32_t computed_crc = crc32(dec);
+            if (computed_crc != stored_crc) {
+                throw std::runtime_error("CRC32 mismatch");
+            }
             (void)dec;
         }
         std::cout << path << ": OK\n";
