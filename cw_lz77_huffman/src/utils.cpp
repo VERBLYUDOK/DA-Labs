@@ -77,7 +77,7 @@ static std::vector<uint32_t> tokens_to_symbols(const std::vector<Token> &tokens)
 
     for (const Token &t : tokens) {
         if (t.offset == 0 && t.length == 0) {
-            // Литерал: просто байт
+            out.push_back(0u); // Маркер
             out.push_back(static_cast<uint32_t>(static_cast<unsigned char>(t.ch)));
         } else {
             // Матч: offset и length как uint16_t
@@ -98,25 +98,27 @@ static std::vector<Token> symbols_to_tokens(const std::vector<uint32_t> &symbols
     out.reserve(symbols.size() / 2);
     size_t i = 0;
     while (i < symbols.size()) {
-        uint32_t val = symbols[i++];
-        if (val <= 255) {
-            // Литерал: val — это байт символа
-            Token t{0, 0, static_cast<char>(val), true};
+        uint32_t off_val = symbols[i++];
+
+        if (off_val == 0) {
+            // Литерал: за 0 идёт символ
+            if (i >= symbols.size()) throw std::runtime_error("Malformed: missing char after offset=0");
+            uint32_t ch_val = symbols[i++];
+            Token t{0, 0, static_cast<char>(ch_val & 0xFF), true};
             out.push_back(t);
         } else {
-            // Матч: val = offset, затем length, has_char, optional ch
+            // Матч: off_val = offset
             if (i + 1 >= symbols.size()) throw std::runtime_error("Malformed: missing length");
             uint32_t len_val = symbols[i++];
             if (i >= symbols.size()) throw std::runtime_error("Malformed: missing has_char");
             uint32_t has = symbols[i++];
 
             Token t;
-            t.offset = static_cast<int>(static_cast<uint16_t>(val));
+            t.offset = static_cast<int>(static_cast<uint16_t>(off_val));
             t.length = static_cast<int>(static_cast<uint16_t>(len_val));
             t.has_char = (has != 0);
-
             if (t.has_char) {
-                if (i >= symbols.size()) throw std::runtime_error("Malformed: missing char after has_char=1");
+                if (i >= symbols.size()) throw std::runtime_error("Malformed: missing char");
                 uint32_t ch_val = symbols[i++];
                 t.ch = static_cast<char>(ch_val & 0xFF);
             } else {
@@ -140,18 +142,15 @@ void write_tokens_binary(std::ostream &out, const std::vector<Token> &tokens, bo
     out.write(reserved, 2);
 
     if (!use_huffman) {
-        // old raw format
         write_u64(out, static_cast<uint64_t>(tokens.size()));
         for (const Token &t : tokens) {
-            if (t.offset == 0 && t.length == 0) {
-                char has = 1;
-                out.put(has);
+            write_u16(out, static_cast<uint16_t>(t.offset));  // 0 для литерала, > 0 для матча
+            if (t.offset == 0) {
                 out.put(t.ch);
             } else {
-                write_u16(out, static_cast<uint16_t>(t.offset));
+                // Матч
                 write_u16(out, static_cast<uint16_t>(t.length));
-                char has = t.has_char ? 1 : 0;
-                out.put(has);
+                out.put(t.has_char ? 1 : 0);
                 if (t.has_char) out.put(t.ch);
             }
         }
@@ -186,21 +185,32 @@ std::vector<Token> read_tokens_binary(std::istream &in) {
 
         for (uint64_t i = 0; i < count; ++i) {
             uint16_t off = read_u16(in);
-            uint16_t len = read_u16(in);
-            int has_char_byte = in.get();
-            if (has_char_byte == EOF) throw std::runtime_error("Unexpected EOF reading has_char");
 
             Token t;
             t.offset = static_cast<int>(off);
-            t.length = static_cast<int>(len);
-            t.has_char = (has_char_byte != 0);
 
-            if (t.has_char) {
+            if (t.offset == 0) {
+                // Литерал
                 int c = in.get();
-                if (c == EOF) throw std::runtime_error("Unexpected EOF reading token char");
+                if (c == EOF) throw std::runtime_error("Unexpected EOF reading literal char");
+                t.length = 0;
+                t.has_char = true;
                 t.ch = static_cast<char>(c);
             } else {
-                t.ch = '\0';
+                // Матч
+                uint16_t len = read_u16(in);
+                int has = in.get();
+                if (has == EOF) throw std::runtime_error("Unexpected EOF reading has_char");
+
+                t.length = static_cast<int>(len);
+                t.has_char = (has != 0);
+                if (t.has_char) {
+                    int c = in.get();
+                    if (c == EOF) throw std::runtime_error("Unexpected EOF reading match char");
+                    t.ch = static_cast<char>(c);
+                } else {
+                    t.ch = '\0';
+                }
             }
             tokens.push_back(t);
         }
