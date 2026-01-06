@@ -150,7 +150,7 @@ std::vector<Token> lz77_compress_sa(const std::string &s) {
             }
         }
 
-        if (best_len < 6) {
+        if (best_len < 5) {
             res.push_back({0,0,s[pos],true});
             pos += 1;
         } else {
