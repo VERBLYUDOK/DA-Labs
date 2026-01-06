@@ -10,55 +10,89 @@
 #include <algorithm>
 #include <iterator>
 #include <array>
+#include <sstream>
 
 class BitWriter {
-    std::ostream &out_;
+    // std::ostream &out_;
+    std::vector<unsigned char>& out_;
     unsigned char cur_;
     int bits_filled_;
+    uint64_t total_bits_;
 public:
-    explicit BitWriter(std::ostream &out) : out_(out), cur_(0), bits_filled_(0) {}
-    ~BitWriter() { flush(); }
+    explicit BitWriter(std::vector<unsigned char>& out) : out_(out), cur_(0), bits_filled_(0), total_bits_(0) {}
+    ~BitWriter() = default;
     void write_bit(int bit) {
         cur_ = static_cast<unsigned char>((cur_ << 1) | (bit & 1));
         bits_filled_++;
+        total_bits_++;
         if (bits_filled_ == 8) {
-            out_.put(static_cast<char>(cur_));
+            out_.push_back(static_cast<unsigned char>(cur_));
             bits_filled_ = 0;
             cur_ = 0;
         }
+    }
+    void write_byte(int byte) {
+        for (int i = 7; i >= 0; --i) {
+            write_bit((byte >> i) & 1);
+        }
+    }
+    void write_u16(uint16_t v) {
+        write_byte((v >> 8) & 0xFF);
+        write_byte(v & 0xFF);
     }
     void flush() {
         if (bits_filled_ > 0) {
             unsigned char padded = static_cast<unsigned char>(cur_ << (8 - bits_filled_));
-            out_.put(static_cast<char>(padded));
+            out_.push_back(padded);
             bits_filled_ = 0;
             cur_ = 0;
         }
     }
+    uint64_t total_bits() const { return total_bits_; }
 };
 
 class BitReader {
-    std::istream &in_;
-    unsigned char cur_;
-    int bits_left_;
-    bool eof_ = false;
+    const unsigned char* data_;
+    size_t byte_size_;
+    uint64_t valid_bits_;
+    unsigned char cur_ = 0;
+    int bits_left_ = 0;
+    uint64_t pos_ = 0;
+
 public:
-    explicit BitReader(std::istream &in) : in_(in), cur_(0), bits_left_(0) {}
+    BitReader(const unsigned char* data, size_t size, uint64_t valid_bits)
+        : data_(data), byte_size_(size), valid_bits_(valid_bits) {}
+
     int read_bit() {
+        if (pos_ >= valid_bits_) return -1;
         if (bits_left_ == 0) {
-            int c = in_.get();
-            if (c == EOF) {
-                eof_ = true;
-                return -1;
-            }
-            cur_ = static_cast<unsigned char>(c);
+            size_t byte_idx = pos_ / 8;
+            if (byte_idx >= byte_size_) return -1;
+            cur_ = data_[byte_idx];
             bits_left_ = 8;
         }
         int bit = (cur_ >> (bits_left_ - 1)) & 1;
         bits_left_--;
+        pos_++;
         return bit;
     }
-    bool eof() const { return eof_; }
+
+    int read_byte() {
+        int b = 0;
+        for (int i = 0; i < 8; ++i) {
+            int bit = read_bit();
+            if (bit == -1) return -1;
+            b = (b << 1) | bit;
+        }
+        return b;
+    }
+
+    uint16_t read_u16() {
+        int high = read_byte();
+        int low = read_byte();
+        if (high == -1 || low == -1) throw std::runtime_error("Unexpected EOF reading u16");
+        return static_cast<uint16_t>((high << 8) | low);
+    }
 };
 
 namespace {
@@ -214,36 +248,55 @@ void write_tokens_binary(std::ostream &out, const std::vector<Token> &tokens, bo
     char reserved[2] = {0,0};
     out.put(version);
     out.put(level);
+    // CRC32
     for (int i = 0; i < 4; ++i) {
         out.put(static_cast<char>(data_crc >> (i * 8)));
     }
     out.write(reserved, 2);
 
-    if (!use_huffman) {
-        write_u64(out, static_cast<uint64_t>(tokens.size()));
-        BitWriter bw(out);
-        for (const Token &t : tokens) {
-            if (t.offset == 0) {
-                // Литерал: флаг 0 + char
-                bw.write_bit(0);
-                out.put(t.ch);
-            } else {
-                // Матч: флаг 1 + u16 offset + u16 length + 1 бит has_char + опционально char
-                bw.write_bit(1);
-                write_u16(out, static_cast<uint16_t>(t.offset));
-                write_u16(out, static_cast<uint16_t>(t.length));
-                bw.write_bit(t.has_char ? 1 : 0);
-                if (t.has_char) out.put(t.ch);
+    // Общий бит-пакетный формат для токенов
+    std::vector<unsigned char> packed_bytes;
+    packed_bytes.reserve(tokens.size() * 4);  // оценка
+
+    BitWriter bw(packed_bytes);
+
+    // Записываем количество токенов как 64 бита
+    for (int i = 63; i >= 0; --i) {
+        bw.write_bit(static_cast<int>((tokens.size() >> i) & 1));
+    }
+
+    // Записываем токены
+    for (const Token &t : tokens) {
+        if (t.offset == 0 && t.length == 0) {
+            bw.write_bit(0);  // флаг: литерал
+            bw.write_byte(static_cast<unsigned char>(t.ch));
+        } else {
+            bw.write_bit(1);  // флаг: матч
+            bw.write_u16(static_cast<uint16_t>(t.offset));
+            bw.write_u16(static_cast<uint16_t>(t.length));
+            bw.write_bit(t.has_char ? 1 : 0);
+            if (t.has_char) {
+                bw.write_byte(static_cast<unsigned char>(t.ch));
             }
         }
-        bw.flush();
+    }
+
+    bw.flush();
+
+    if (!use_huffman) {
+        // Режим -1: пишем valid_bits и packed_bytes напрямую
+        write_u64(out, bw.total_bits());
+        out.write(reinterpret_cast<const char*>(packed_bytes.data()), packed_bytes.size());
     } else {
-        // Huffman mode: convert tokens -> symbols, then call huffman::encode_symbols
-        auto symbols = tokens_to_symbols(tokens);
-        // We will write the Huffman block directly. huffman::encode_symbols writes:
-        // [unique_count][(symbol,code_len)*][symbols_bitstream],
-        // but we also need to store total symbols count for decoding; encode_symbols writes that
+        write_u64(out, bw.total_bits());
+        std::vector<uint32_t> symbols;
+        symbols.reserve(packed_bytes.size());
+        for (unsigned char b : packed_bytes) {
+            symbols.push_back(static_cast<uint32_t>(b));
+        }
+
         huffman::encode_symbols(symbols, out);
+
     }
 }
 
@@ -251,12 +304,10 @@ void write_tokens_binary(std::ostream &out, const std::vector<Token> &tokens, bo
 std::pair<std::vector<Token>, uint32_t> read_tokens_binary(std::istream &in) {
     char magic[4];
     in.read(magic, 4);
-    if (!in) throw std::runtime_error("Failed to read archive header");
-    if (std::memcmp(magic, "LZ77", 4) != 0) throw std::runtime_error("Not an LZ77 archive");
+    if (!in || std::memcmp(magic, "LZ77", 4) != 0) throw std::runtime_error("Invalid header");
 
     int version = in.get();
     int level = in.get();
-    // Читаем CRC32
     uint32_t stored_crc = 0;
     for (int i = 0; i < 4; ++i) {
         int c = in.get();
@@ -265,57 +316,77 @@ std::pair<std::vector<Token>, uint32_t> read_tokens_binary(std::istream &in) {
     }
     char reserved[2];
     in.read(reserved, 2);
-    (void)version;
-    (void)reserved;
 
+    uint64_t valid_bits = read_u64(in);
+
+    std::vector<unsigned char> packed_bytes;
     if (level == 1) {
-        uint64_t count = read_u64(in);
-        std::vector<Token> tokens;
-        tokens.reserve(static_cast<size_t>(count));
+        // Читаем raw биты
+        uint64_t byte_count = (valid_bits + 7) / 8;
+        packed_bytes.resize(byte_count);
+        in.read(reinterpret_cast<char*>(packed_bytes.data()), byte_count);
+        if (!in) throw std::runtime_error("Failed to read packed bytes");
+    } else if (level == 9) {
+        auto symbols = huffman::decode_symbols(in);
 
-        BitReader br(in);
-        for (uint64_t i = 0; i < count; ++i) {
-            int flag = br.read_bit();
-            if (flag == -1) throw std::runtime_error("Unexpected EOF reading token flag");
+        packed_bytes.reserve(symbols.size());
+        for (uint32_t s : symbols) {
+            if (s > 255) throw std::runtime_error("Invalid byte in Huffman stream");
+            packed_bytes.push_back(static_cast<unsigned char>(s));
+        }
+        // uint64_t valid_bits = read_u64(in);
+    } else {
+        throw std::runtime_error("Unsupported level");
+    }
 
-            Token t;
-            if (flag == 0) {
-                // Литерал
-                int c = in.get();
-                if (c == EOF) throw std::runtime_error("Unexpected EOF reading literal char");
-                t.offset = 0;
-                t.length = 0;
-                t.has_char = true;
+    // Теперь читаем токены из packed_bytes
+    BitReader br(packed_bytes.data(), packed_bytes.size(), valid_bits);
+
+    uint64_t count = 0;
+    for (int i = 0; i < 64; ++i) {
+        int bit = br.read_bit();
+        if (bit == -1) throw std::runtime_error("EOF reading token count");
+        count = (count << 1) | bit;
+    }
+
+    std::vector<Token> tokens;
+    tokens.reserve(static_cast<size_t>(count));
+
+    for (uint64_t i = 0; i < count; ++i) {
+        int flag = br.read_bit();
+        if (flag == -1) throw std::runtime_error("EOF reading token flag");
+
+        Token t;
+        if (flag == 0) {
+            // Литерал
+            int c = br.read_byte();
+            if (c == -1) throw std::runtime_error("EOF reading literal char");
+            t.offset = 0;
+            t.length = 0;
+            t.has_char = true;
+            t.ch = static_cast<char>(c);
+        } else {
+            // Матч
+            uint16_t off = br.read_u16();
+            uint16_t len = br.read_u16();
+            int has = br.read_bit();
+            if (has == -1) throw std::runtime_error("EOF reading has_char");
+
+            t.offset = static_cast<int>(off);
+            t.length = static_cast<int>(len);
+            t.has_char = (has != 0);
+            if (t.has_char) {
+                int c = br.read_byte();
+                if (c == -1) throw std::runtime_error("EOF reading match char");
                 t.ch = static_cast<char>(c);
             } else {
-                // Матч
-                uint16_t off = read_u16(in);
-                uint16_t len = read_u16(in);
-                int has_bit = br.read_bit();
-                if (has_bit == -1) throw std::runtime_error("Unexpected EOF reading has_char bit");
-
-                t.offset = static_cast<int>(off);
-                t.length = static_cast<int>(len);
-                t.has_char = (has_bit != 0);
-                if (t.has_char) {
-                    int c = in.get();
-                    if (c == EOF) throw std::runtime_error("Unexpected EOF reading match char");
-                    t.ch = static_cast<char>(c);
-                } else {
-                    t.ch = '\0';
-                }
+                t.ch = '\0';
             }
-            tokens.push_back(t);
         }
-        return {tokens, stored_crc};
-    } else if (level == 9) {
-        // Huffman-coded symbol stream
-        auto symbols = huffman::decode_symbols(in);
-        auto tokens = symbols_to_tokens(symbols);
-        return {tokens, stored_crc};
-    } else {
-        throw std::runtime_error("Unsupported archive level");
+        tokens.push_back(t);
     }
+
+    return {tokens, stored_crc};
 }
 
 // open input: if path == "-" return &std::cin (caller must NOT delete), else open ifstream
