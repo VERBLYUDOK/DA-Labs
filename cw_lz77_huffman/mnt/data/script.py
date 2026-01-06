@@ -27,7 +27,7 @@ def make_uniform(size):
     return bytes(random.choices(alphabet, k=size))
 
 def make_normal(size):
-    arr = np.random.normal(loc=128, scale=30, size=size).astype(np.int16)
+    arr = np.random.normal(loc=128, scale=2, size=size).astype(np.int16)
     arr = np.clip(arr, 0, 255).astype(np.uint8)
     return bytes(arr.tobytes())
 
